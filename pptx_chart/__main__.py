@@ -238,7 +238,6 @@ def make_chart(slide, data):
         chart.chart_title.text_frame.paragraphs[0].font.name = chart_spec['title_font']
     if 'title_size' in chart_spec:
         chart.chart_title.text_frame.paragraphs[0].font.size = Pt(float(chart_spec['title_size']))
-        
 
     category_axis = chart.category_axis
     apply_axis_format(category_axis, x_spec)
