@@ -10,5 +10,5 @@ This tool is useful for automating the addition of new charts to a powerpoint pr
 1. Install Python (>= 3.7) and pip
 2. Run the following:
     ```
-    $ pip install https://github.com/OrthogonalJ/pptx_chart.git
+    $ pip install git+https://github.com/OrthogonalJ/pptx_chart.git
     ```
