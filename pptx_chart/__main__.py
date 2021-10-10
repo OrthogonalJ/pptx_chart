@@ -11,6 +11,8 @@ import pandas as pd
 from tqdm import tqdm
 import numpy as np
 
+from pptx_chart.not_found_error import NotFoundError
+
 LEGEND_POSITIONS = {
     'bottom': pptx.enum.chart.XL_LEGEND_POSITION.BOTTOM,
     'corner': pptx.enum.chart.XL_LEGEND_POSITION.CORNER,
@@ -114,6 +116,14 @@ CHART_TYPE = {
     'xy_scatter_smooth_no_markers': XL_CHART_TYPE.XY_SCATTER_SMOOTH_NO_MARKERS
 }
 
+
+def handle_missing_chart_error(error, ignore_missing_charts):
+    if ignore_missing_charts:
+        print('WARNING:', error)
+    else:
+        raise error
+
+
 def parse_bool(value):
     return str(value).lower() == 'true'
 
@@ -137,6 +147,10 @@ def parse_y_specs(data):
             prop_name = col_name[len(PREFIX) + len(series_key) + 1:]
             specs[series_key][prop_name] = data.loc[:, col_name].dropna().drop_duplicates().iloc[0]
     specs = list(specs.values())
+    
+    for spec in specs:
+        spec['name'] = spec.get('name', spec['col'])
+    
     return specs
 
 
@@ -170,26 +184,32 @@ def clean_series_values(values):
     return values
 
 
-def make_chart(slide, data):
+def make_chart_data(data, x_spec, y_specs):
+    chart_data = ChartData()
+
+    categories = data.loc[:, x_spec['col']]
+    if x_spec['type'] == 'date':
+        categories = pd.to_datetime(categories)
+    chart_data.categories = categories
+
+    for spec in y_specs:
+        col_name = spec['col']
+        series_name = spec.get('name', col_name)
+        values = clean_series_values(data.loc[:, col_name])
+        chart_data.add_series(series_name, values)
+    
+    return chart_data
+
+
+def parse_specs(data):
     y_specs = parse_y_specs(data)
     
-    y_axis_spec = {
-        # title
-        # tick_size
-        # tick_font
-        # tick_italic
-        # tick_bold
-    }
+    y_axis_spec = {}
     y_axis_spec = parse_spec_cols(data, 'y_axis.', y_axis_spec)
 
     x_spec = {
         'col': 'x',
         'type': 'string',
-        # title
-        # tick_size
-        # tick_font
-        # tick_italix
-        # tick_bold
     }
     x_spec = parse_spec_cols(data, 'x_axis.', x_spec)
 
@@ -206,27 +226,30 @@ def make_chart(slide, data):
     }
     chart_spec = parse_spec_cols(data, 'chart.', chart_spec)
 
-    chart_data = ChartData()
+    return {
+        'y': y_specs,
+        'x': x_spec,
+        'legend': legend_spec,
+        'chart': chart_spec,
+        'y_axis': y_axis_spec
+    }
 
-    categories = data.loc[:, x_spec['col']]
-    if x_spec['type'] == 'date':
-        categories = pd.to_datetime(categories)
-    chart_data.categories = categories
 
-    for i, spec in enumerate(y_specs):
-        col_name = spec['col']
-        series_name = spec.get('name', col_name)
-        values = clean_series_values(data.loc[:, col_name])
-        chart_data.add_series(series_name, values)
+def get_facet_iterator(data):
+    facet_ids_col = data['facet.col'].dropna().drop_duplicates().iloc[0]
+    facet_ids = data[facet_ids_col].dropna().drop_duplicates()
+    for facet_id in tqdm(facet_ids):
+        print('facet_id:', facet_id)
+        facet_data = data.loc[data[facet_ids_col] == facet_id, :]
+        yield facet_data
 
-    chart = slide.shapes.add_chart(
-        CHART_TYPE[chart_spec['type']],
-        Cm(0),
-        Cm(0),
-        Cm(float(chart_spec['width'])),
-        Cm(float(chart_spec['height'])),
-        chart_data
-    ).chart
+
+def format_chart(chart, specs):
+    y_specs = specs['y']
+    y_axis_spec = specs['y_axis']
+    x_spec = specs['x']
+    legend_spec = specs['legend']
+    chart_spec = specs['chart']
 
     if 'title' in chart_spec:
         chart.chart_title.text_frame.text = chart_spec['title']
@@ -266,14 +289,33 @@ def make_chart(slide, data):
     chart.has_legend = legend_enabled
     if legend_enabled:
         chart.legend.position = LEGEND_POSITIONS[legend_spec['position']]
-    
+
+
+def make_chart(slide, data):
+    specs = parse_specs(data)
+    y_specs = specs['y']
+    x_spec = specs['x']
+    chart_spec = specs['chart']
+
+    chart_data = make_chart_data(data, x_spec, y_specs)
+
+    chart_shape = slide.shapes.add_chart(
+        CHART_TYPE[chart_spec['type']],
+        Cm(0),
+        Cm(0),
+        Cm(float(chart_spec['width'])),
+        Cm(float(chart_spec['height'])),
+        chart_data
+    )
+    if 'id' in chart_spec:
+        chart_shape.name = chart_spec['id']
+    chart = chart_shape.chart
+
+    format_chart(chart, specs)
+
 
 def make_facet_charts(slide, data):
-    facet_ids_col = data['facet.col'].dropna().drop_duplicates().iloc[0]
-    facet_ids = data[facet_ids_col].dropna().drop_duplicates()
-    for facet_id in tqdm(facet_ids):
-        print('facet_id:', facet_id)
-        facet_data = data.loc[data[facet_ids_col] == facet_id, :]
+    for facet_data in get_facet_iterator(data):
         make_chart(slide, facet_data)
 
 
@@ -285,7 +327,7 @@ def add_chart(output_file, data_file, slide_idx=None, input_file=None):
         # NOTE: 1 = Title and content layout
         presentation.slides.add_slide(presentation.slide_layouts[1])
         slide_idx = 0
-    slide = list(presentation.slides)[slide_idx]
+    slide = presentation.slides[slide_idx]
 
     data = pd.read_csv(data_file, dtype='str')
 
@@ -297,19 +339,100 @@ def add_chart(output_file, data_file, slide_idx=None, input_file=None):
     presentation.save(output_file)
 
 
+def _update_chart(data, slide, shape_id, should_update_format):
+    try:
+        chart_shape = [shape for shape in slide.shapes if shape.name == shape_id][0]
+    except IndexError:
+        raise NotFoundError('Shape with id {} not found'.format(shape_id))
+    
+    specs = parse_specs(data)
+    x_specs = specs['x']
+    y_specs = specs['y']
+    y_specs_indexed = {spec['name']: spec for spec in y_specs}
+    # Ensure series order matches existing chart
+    series_names = [series.name for series in chart_shape.chart.series]
+    y_specs = [y_specs_indexed[name] for name in series_names]
+
+    chart_data = make_chart_data(data, x_spec=x_specs, y_specs=y_specs)
+    chart_shape.chart.replace_data(chart_data)
+
+    if should_update_format:
+        format_chart(chart_shape.chart, specs)
+
+
+def update_facet_charts(data, slide, should_update_format, ignore_missing_charts):
+    for facet_data in get_facet_iterator(data):
+        specs = parse_specs(facet_data)
+        shape_id = specs['chart']['id']
+        try:
+            _update_chart(facet_data, slide, shape_id, should_update_format)
+        except NotFoundError as err:
+            handle_missing_chart_error(err, ignore_missing_charts)
+
+
+def update_chart(
+        input_file, 
+        data_file, 
+        slide_idx, 
+        shape_id=None, 
+        output_file=None, 
+        should_update_format=False,
+        ignore_missing_charts=False):
+    output_file = output_file if output_file is not None else input_file
+    presentation = pptx.Presentation(input_file)
+    slide = presentation.slides[slide_idx]
+
+    data = pd.read_csv(data_file, dtype='str')
+
+    if 'facet.col' in data.columns:
+        update_facet_charts(data, slide, should_update_format, ignore_missing_charts)
+    else:
+        if shape_id is None:
+            raise ValueError('Argument shape_id is required')
+        try:
+            _update_chart(data, slide, shape_id, should_update_format)
+        except NotFoundError as err:
+            handle_missing_chart_error(err, ignore_missing_charts)
+
+    presentation.save(output_file)
+
+
 def main():
-    arg_parser = argparse.ArgumentParser()
-    arg_parser.add_argument('-o', '--output_file', required=True)
-    arg_parser.add_argument('-d', '--data_file', required=True)
-    arg_parser.add_argument('-i', '--input_file')
-    arg_parser.add_argument('-s', '--slide', type=int, default=0)
+    arg_parser = argparse.ArgumentParser(prog='pptx_chart')
+    arg_parser.add_argument('-o', '--output_file', help='pptx file to write to. Defaults to -i/--input_file when -U/--update is used.')
+    arg_parser.add_argument('-d', '--data_file', required=True, help='CSV file containing the chart data and format specifications.')
+    arg_parser.add_argument('-i', '--input_file', help='Existing pptx file to add the chart(s) to or to update if used with -U/--update.')
+    arg_parser.add_argument('-s', '--slide', type=int, default=1, help='Index of the slide to modify.')
+    arg_parser.add_argument('-k', '--shape_id', help='Selection pane name for the shape that contains the chart to be updated (use with -U/--update).')
+    arg_parser.add_argument('-U', '--update', action='store_true', help='Update an existing chart that has a selection pane name equal to -k/--shape_id or the value of the chart.id column (only if the facet.col is present).')
+    arg_parser.add_argument('--update-format', action='store_true', help='Update chart formats (use with --U/--update).')
+    arg_parser.add_argument('--ignore-missing-charts', action='store_true', help='Continue without raising an error if the chart cannot be found (use with -U/--update).')
     args = arg_parser.parse_args()
-    add_chart(
-        output_file=args.output_file,
-        data_file=args.data_file,
-        slide_idx=args.slide,
-        input_file=args.input_file
-    )
+    slide = (args.slide - 1) if args.slide is not None else None
+
+    if not args.update:
+        if args.output_file is None:
+            raise ValueError('Argument -o/--output_file is required')
+        add_chart(
+            output_file=args.output_file,
+            data_file=args.data_file,
+            slide_idx=slide,
+            input_file=args.input_file
+        )
+    else:
+        if args.slide is None:
+            raise ValueError('Argument -s/--slide is required when using -U/--update')
+        if args.input_file is None:
+            raise ValueError('Argument -i/--input_file is required when using -U/--update')
+        update_chart(
+            output_file=args.output_file,
+            data_file=args.data_file,
+            slide_idx=slide,
+            input_file=args.input_file,
+            shape_id=args.shape_id,
+            should_update_format=args.update_format,
+            ignore_missing_charts=args.ignore_missing_charts
+        )
 
 
 if __name__ == '__main__':
